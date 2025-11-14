@@ -61,6 +61,11 @@ struct SuperBlock
  */
 class DiskFS
 {
+    // 声明测试函数为友元，允许它们访问私有成员
+    friend void test_bitmap_ops();    // 位图测试函数
+    friend void test_block_ops();     // 块操作测试函数
+    friend void test_file_ops();      // 文件操作测试函数
+
 private:
     mutable std::fstream disk_file;  // 磁盘文件流（用于读写磁盘文件）
     std::string disk_path;   // 磁盘文件路径
