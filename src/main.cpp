@@ -225,7 +225,7 @@ void consumer_thread()
                     break;
 
                 default:
-                    task.result = "未知命令，请输入help查看帮助\n";
+                    task.result = "未知命令，支持命令：ls/cat/rm/copy/write/touch/exit \n";
                     task.completed = true;
             }
         } catch (...) {
@@ -233,7 +233,15 @@ void consumer_thread()
             task.completed = true;
         }
 
-        std::cout << task.result;
+         // 输出结果（空输入不输出）
+        if (!task.result.empty()) {
+            std::cout << task.result;
+        }
+
+        // 关键：任务执行完，打印下一个>（EXIT命令除外）
+        if (task.type != CommandType::EXIT) {
+            std::cout << "> " << std::flush;
+        }
 
         if (task.type == CommandType::EXIT) {
             running = false;
@@ -261,8 +269,9 @@ int main() {
 
     std::string input;
     std::cout << "磁盘模拟器就绪（支持命令：ls/cat/rm/copy/write/touch/exit）" << std::endl;
+    std::cout << "> " << std::flush; 
     while (running) {
-        std::cout << "> " << std::endl;
+       
         std::getline(std::cin, input);
 
         std::vector<std::string> args;
