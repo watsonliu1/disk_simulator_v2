@@ -30,12 +30,13 @@ DiskFS::~DiskFS()
  * @return 若inode编号有效，返回其在磁盘中的起始字节位置；否则返回0（无效位置）
  * 计算逻辑：inode区起始块 × 块大小 + inode编号 × 单个inode大小
  */
-uint32_t DiskFS::get_inode_pos(uint32_t inode_num) {
+uint32_t DiskFS::get_inode_pos(uint32_t inode_num) const {
     // 检查inode编号是否超出允许范围（总inode数由超级块定义）
     if (inode_num >= super_block.total_inodes) return 0;
     // inode区起始位置 = 超级块中记录的inode起始块 × 块大小
     // 目标inode位置 = inode区起始位置 + inode编号 × 单个inode大小（INODE_SIZE）
-    return super_block.inode_start * BLOCK_SIZE + inode_num * INODE_SIZE;
+    //return super_block.inode_start * BLOCK_SIZE + inode_num * INODE_SIZE;
+    return super_block.inode_start * BLOCK_SIZE + inode_num * sizeof(struct Inode);
 }
 
 /**
@@ -436,6 +437,13 @@ bool DiskFS::format()
     // 将初始化好的根目录inode写入磁盘
     disk_file.seekp(get_inode_pos(0));
     disk_file.write((char*)&root_inode, sizeof(Inode));
+
+    // 检查写入是否成功
+    if (disk_file.fail()) {
+        std::cerr << "根目录inode写入失败！" << std::endl;
+    } else {
+        std::cerr << "根目录inode写入成功" << std::endl;
+    }
     
     // 初始化根目录内容：包含"当前目录"（.）的目录项
     memset(buffer, 0, BLOCK_SIZE);  // 清空缓冲区
@@ -445,11 +453,6 @@ bool DiskFS::format()
     strcpy(root_entry[0].name, ".");
     root_entry[0].inode_num = 0;  // 关联0号inode（根目录）
     root_entry[0].valid = 1;      // 标记为有效
-
-    // 初始化".."（父目录）：根目录的父目录是自身，同样指向0号inode
-    strcpy(root_entry[1].name, "..");
-    root_entry[1].inode_num = 0;  // 父目录也指向根目录inode
-    root_entry[1].valid = 1;      // 标记为有效
 
     set_block_bitmap(root_block, true);  // 标记该块为已使用（更新块位图）
             
@@ -515,71 +518,123 @@ bool DiskFS::unmount()
  * @param name 文件名（最大长度为MAX_FILENAME-1，含终止符）
  * @return 成功返回新文件的inode编号；失败返回-1（已存在/无空闲inode/未挂载等）
  */
-int DiskFS::create_file(const std::string& name) {
-    // 检查前置条件：磁盘已挂载，且文件名长度合法（不超过最大限制）
-    if (!isMounted() || name.length() >= MAX_FILENAME) return -1;
+int DiskFS::create_file(const std::string& name)
+{
+    // 前置条件检查：磁盘已挂载，文件名长度合法（不含终止符不超过MAX_FILENAME-1）
+    if (!isMounted() || name.empty() || name.length() >= MAX_FILENAME) 
+    {
+        std::cerr << "创建文件失败：磁盘未挂载或文件名无效" << std::endl;
+        return -1;
+    }
 
-    // 检查文件是否已存在（遍历根目录的目录项）
+    // 清除文件流错误状态，避免之前的错误影响当前操作
+    disk_file.clear();
+
+    // 检查文件是否已存在（遍历根目录目录项）
     std::vector<DirEntry> dir_list = list_files();
-    for (const auto& entry : dir_list) {
-        if (entry.valid && name == entry.name) {
-            return -1;  // 文件名已存在，创建失败
+    for (const auto& entry : dir_list) 
+    {
+        if (entry.valid && name == entry.name) 
+        {
+            std::cerr << "创建文件失败：" << name << " 已存在" << std::endl;
+            return -1;
         }
     }
 
-    // 读取根目录inode（0号inode）
+    // 读取根目录inode（0号inode），并检查读取结果
     Inode root_inode;
     disk_file.seekg(get_inode_pos(0));
     disk_file.read((char*)&root_inode, sizeof(Inode));
-    if (root_inode.type != 2) return -1;  // 根目录必须是目录类型（类型2）
 
-    // 分配一个空闲的inode
+    if (disk_file.fail() || root_inode.type != 2) {  // 检查读取失败或类型错误
+        std::cerr << "创建文件失败：根目录inode无效" << std::endl;
+        return -1;
+    }
+
+    // 检查根目录数据块是否有效（至少分配了一个块）
+    if (root_inode.blocks[0] == 0)
+    {  // 假设0表示未分配块
+        std::cerr << "创建文件失败：根目录数据块未分配" << std::endl;
+        return -1;
+    }
+
+    // 分配空闲inode
     int inode_num = find_free_inode();
-    if (inode_num == -1) return -1;  // 无空闲inode，创建失败
+    if (inode_num == -1) {
+        std::cerr << "创建文件失败：无空闲inode" << std::endl;
+        return -1;
+    }
 
-    // 初始化新文件的inode（类型为普通文件）
+    // 初始化新文件的inode（普通文件类型）
     time_t now = time(nullptr);
     Inode new_inode;
     memset(&new_inode, 0, sizeof(Inode));
-    new_inode.inode_num = inode_num;
-    new_inode.type = 1;  // 类型标识：1表示普通文件
+    new_inode.type = 1;  // 1：普通文件（确保Inode结构体有type成员）
     new_inode.used = 1;  // 标记为已使用
-    new_inode.create_time = now;  // 创建时间
-    new_inode.modify_time = now;  // 修改时间（初始与创建时间相同）
-    new_inode.size = 0;  // 初始文件大小为0（无数据）
+    new_inode.create_time = now;
+    new_inode.modify_time = now;
+    new_inode.size = 0;  // 初始大小为0
 
-    // 将新inode写入磁盘
+    // 写入新inode到磁盘，并检查操作结果
     disk_file.seekp(get_inode_pos(inode_num));
     disk_file.write((char*)&new_inode, sizeof(Inode));
-    set_inode_bitmap(inode_num, true);  // 标记该inode为已使用
+    if (disk_file.fail()) {
+        std::cerr << "创建文件失败：写入inode " << inode_num << " 失败" << std::endl;
+        return -1;  // 写入失败，不标记位图，避免inode泄露
+    }
+    set_inode_bitmap(inode_num, true);  // 写入成功后再标记位图
 
-    // 在根目录中添加新文件的目录项
+    // 读取根目录数据块（简化设计：根目录仅使用1个块）
     char buffer[BLOCK_SIZE];
-    // 读取根目录的数据块（根目录仅使用1个块，简化设计）
-    if (!read_block(root_inode.blocks[0], buffer)) return -1;
-
-    DirEntry* dir_entries = (DirEntry*)buffer;  // 缓冲区转换为目录项数组
-    // 遍历目录项，寻找第一个空闲位置（跳过0号位置的"."目录项）
-    for (size_t i = 1; i < BLOCK_SIZE / sizeof(DirEntry); i++) {
-        if (!dir_entries[i].valid) {  // 找到空闲目录项
-            // 复制文件名（确保不超过最大长度）
-            strncpy(dir_entries[i].name, name.c_str(), MAX_FILENAME - 1);
-            dir_entries[i].name[MAX_FILENAME - 1] = '\0';  // 确保字符串终止符
-            dir_entries[i].inode_num = inode_num;  // 关联新文件的inode
-            dir_entries[i].valid = 1;  // 标记为有效目录项
-            break;  // 找到位置后退出循环
-        }
+    if (!read_block(root_inode.blocks[0], buffer)) {
+        std::cerr << "创建文件失败：读取根目录数据块失败" << std::endl;
+        // 回滚：删除已分配的inode（标记为未使用）
+        set_inode_bitmap(inode_num, false);
+        return -1;
     }
 
-    // 将更新后的根目录数据块写回磁盘
-    write_block(root_inode.blocks[0], buffer);
+    // 寻找根目录中第一个空闲目录项（跳过0号的"."）
+    DirEntry* dir_entries = (DirEntry*)buffer;
+    size_t dir_entry_count = BLOCK_SIZE / sizeof(DirEntry);
+    size_t free_index = dir_entry_count;  // 初始化为无效索引
+    for (size_t i = 1; i < dir_entry_count; i++) {
+        if (!dir_entries[i].valid) {
+            free_index = i;
+            break;
+        }
+    }
+    if (free_index == dir_entry_count) {  // 无空闲目录项
+        std::cerr << "创建文件失败：根目录已满，无空闲目录项" << std::endl;
+        // 回滚：删除已分配的inode
+        set_inode_bitmap(inode_num, false);
+        return -1;
+    }
 
-    // 更新根目录的修改时间（因添加了新目录项）
+    // 填充空闲目录项
+    strncpy(dir_entries[free_index].name, name.c_str(), MAX_FILENAME - 1);
+    dir_entries[free_index].name[MAX_FILENAME - 1] = '\0';  // 确保终止符
+    dir_entries[free_index].inode_num = inode_num;
+    dir_entries[free_index].valid = 1;
+
+    // 写回根目录数据块，并检查结果
+    if (!write_block(root_inode.blocks[0], buffer)) {
+        std::cerr << "创建文件失败：写回根目录数据块失败" << std::endl;
+        // 回滚：删除inode和目录项（目录项未写入，仅需回滚inode）
+        set_inode_bitmap(inode_num, false);
+        return -1;
+    }
+
+    // 更新根目录inode的修改时间，并写回磁盘
     root_inode.modify_time = now;
     disk_file.seekp(get_inode_pos(0));
     disk_file.write((char*)&root_inode, sizeof(Inode));
+    if (disk_file.fail()) {
+        std::cerr << "警告：根目录修改时间更新失败，但文件已创建" << std::endl;
+        // 此处不返回-1，因为文件已成功创建，仅元数据有小问题
+    }
 
-    return inode_num;  // 返回新文件的inode编号
+    std::cout << "文件 " << name << " 创建成功，inode：" << inode_num << std::endl;
+    return inode_num;
 }
 
 /**
@@ -844,8 +899,10 @@ std::vector<DirEntry> DiskFS::list_files() {
 /**
  * @brief 打印磁盘的基本信息（总容量、空闲空间、inode使用情况等）
  */
-void DiskFS::print_info() {
-    if (!isMounted()) {
+void DiskFS::print_info()
+{
+    if (!isMounted())
+    {
         std::cout << "请先挂载磁盘（使用mount命令）\n";
         return;
     }
@@ -885,4 +942,51 @@ int DiskFS::get_file_size(int inode_num) {
     }
 
     return inode.size;
+}
+
+bool DiskFS::is_inode_used(uint32_t inode_num) const
+{
+    // 1. 校验inode编号有效性（超出范围视为未使用）
+    if (inode_num >= super_block.total_inodes) 
+    {
+        std::cerr << "inode编号 " << inode_num << " 超出范围（总inode数：" << super_block.total_inodes << "）" << std::endl;
+        return false;
+    }
+
+    // 2. 校验磁盘是否已挂载（未挂载无法读取inode）
+    if (!is_mounted || !disk_file.is_open())
+    {
+        std::cerr << "磁盘未挂载或文件未打开，无法读取inode" << std::endl;
+        return false;
+    }
+
+    // 3. 清除文件流错误状态（避免之前的错误影响当前操作）
+    disk_file.clear();
+
+    // 4. 调用现有get_inode_pos获取inode在磁盘中的位置（字节偏移量）
+    uint32_t inode_offset = get_inode_pos(inode_num);
+    // std::cerr << "读取inode " << inode_num << "，偏移量：" << inode_offset << std::endl;  // 调试用
+
+    // 5. 定位到inode位置，并检查seek是否成功
+    disk_file.seekg(inode_offset);
+    if (disk_file.fail())
+    {
+        std::cerr << "inode " << inode_num << " 定位失败（偏移：" << inode_offset << "）" << std::endl;
+        return false;
+    }
+
+    // 6. 读取inode数据（使用sizeof(Inode)确保读取完整，避免INODE_SIZE不一致问题）
+    Inode inode;
+    disk_file.read((char*)&inode, sizeof(Inode));
+
+    // 7. 校验读取是否成功
+    if (disk_file.fail()) {
+        // std::cerr << "inode " << inode_num << " 读取失败（实际读取字节：" << disk_file.gcount() << "）" << std::endl;
+        return false;
+    }
+
+    // 8. 调试输出（确认读取的used值）
+    // std::cout << "inode " << inode_num << " 的used状态：" << "["  << (int)inode.used << "]"<<std::endl;
+
+    return inode.used;
 }

@@ -246,87 +246,199 @@ void print_help() {
  * @param disk 磁盘文件系统实例
  * @return 所有测试通过返回true，否则返回false
  */
-bool run_tests(DiskFS& disk) {
+bool run_tests(DiskFS& disk)
+{
     int test_count = 0;
     int pass_count = 0;
     std::cout << "\n===== 开始自动测试 =====" << std::endl;
 
-    // 测试1: 格式化磁盘
+    // 测试1: 格式化磁盘（验证超级块和位图初始化）
     test_count++;
     bool format_ok = disk.format();
-    std::cout << "测试" << test_count << "(格式化): " << (format_ok ? "通过" : "失败") << std::endl;
-    if (format_ok) pass_count++;
+    
+    // 额外验证：格式化后超级块应处于初始状态（如总块数正确，空闲块数=数据块数-1）
+    bool super_block_valid = false;
+    if (format_ok)
+    {
+        SuperBlock sb = disk.get_super_block();
+        super_block_valid = (sb.total_blocks > 0 && sb.free_blocks == sb.data_blocks - 1); // 根目录占一个块
+    }
+    std::cout << "测试" << test_count << "(格式化): " << ((format_ok && super_block_valid) ? "通过" : "失败") << std::endl;
+    if (format_ok && super_block_valid) pass_count++;
 
-    // 测试2: 挂载磁盘
+
+    // 测试2: 挂载磁盘（验证挂载状态和元数据加载）
     test_count++;
     bool mount_ok = disk.mount();
-    std::cout << "测试" << test_count << "(挂载): " << (mount_ok ? "通过" : "失败") << std::endl;
-    if (mount_ok) pass_count++;
+    bool mount_state_valid = disk.isMounted();  // 验证挂载状态标记
+    std::cout << "测试" << test_count << "(挂载): " << ((mount_ok && mount_state_valid) ? "通过" : "失败") << std::endl;
+    if (mount_ok && mount_state_valid) pass_count++;
+    
 
-    // 测试3: 创建文件
+    // 测试3: 创建文件（验证inode分配和目录项添加）
     test_count++;
-    int temp_inode = disk.create_file("test1.txt");
-    uint32_t inode1 = static_cast<uint32_t>(temp_inode);
-    bool create_ok = (temp_inode != -1);
-    std::cout << "测试" << test_count << "(创建文件): " << (create_ok ? "通过" : "失败") << std::endl;
-    if (create_ok) pass_count++;
+    int inode1 = disk.create_file("test1.txt");
+    bool create_ok = (inode1 != -1);
 
-    // 测试4: 禁止创建同名文件
+    // 额外验证：目录项中应包含新文件，且inode状态为"已使用"
+    bool dir_entry_valid = false;
+    bool inode_used_valid = false;
+    if (create_ok) 
+    {
+        std::vector<DirEntry> entries = disk.list_files();
+        for (const auto& e : entries) 
+        {
+            if (std::string(e.name) == "test1.txt" && e.inode_num == (uint32_t)inode1 && e.valid) {
+                dir_entry_valid = true;
+                break;
+            }
+        }
+        inode_used_valid = disk.is_inode_used(inode1);
+    }
+    
+    std::cout << "测试" << test_count << "(创建文件): " << ((create_ok && dir_entry_valid && inode_used_valid) ? "通过" : "失败") << std::endl;
+    if (create_ok && dir_entry_valid && inode_used_valid) pass_count++;
+
+
+    // 测试4: 禁止创建同名文件（验证目录项唯一性）
     test_count++;
     int inode_dup = disk.create_file("test1.txt");
     bool no_dup_ok = (inode_dup == -1);
-    std::cout << "测试" << test_count << "(禁止同名文件): " << (no_dup_ok ? "通过" : "失败") << std::endl;
-    if (no_dup_ok) pass_count++;
+    // 额外验证：原文件inode和目录项未被修改
+    bool original_file_valid = false;
+    if (no_dup_ok)
+    {
+        std::vector<DirEntry> entries = disk.list_files();
+        for (const auto& e : entries) {
+            if (std::string(e.name) == "test1.txt" && e.inode_num == (uint32_t)inode1 && e.valid) {
+                original_file_valid = true;
+                break;
+            }
+        }
+    }
+    std::cout << "测试" << test_count << "(禁止同名文件): " << ((no_dup_ok && original_file_valid) ? "通过" : "失败") << std::endl;
+    if (no_dup_ok && original_file_valid) pass_count++;
 
-    // 测试5: 写入文件
+    // 测试5: 写入文件（验证数据块分配和内容正确性）
     test_count++;
     std::string content = "hello, disk fs!";
     int write_size = disk.write_file(inode1, content.c_str(), content.size(), 0);
     bool write_ok = (write_size == (int)content.size());
+
     std::cout << "测试" << test_count << "(写入文件): " << (write_ok ? "通过" : "失败") << std::endl;
     if (write_ok) pass_count++;
 
-    // 测试6: 读取文件
+
+    // 测试6: 读取文件（验证内容和偏移量读取）
     test_count++;
+    // 6.1 完整读取
     char* read_buf = new char[content.size() + 1];
     int read_size = disk.read_file(inode1, read_buf, content.size(), 0);
     read_buf[read_size] = '\0';
-    bool read_ok = (read_size == (int)content.size() && std::string(read_buf) == content);
-    std::cout << "测试" << test_count << "(读取文件): " << (read_ok ? "通过" : "失败") << std::endl;
-    if (read_ok) pass_count++;
+    
+    bool full_read_ok = (read_size == (int)content.size() && std::string(read_buf) == content);
+    
+   
+    // 6.2 偏移量读取（从第6个字符开始读，验证部分读取）
+    char* partial_buf = new char[10];
+    int partial_read = disk.read_file(inode1, partial_buf, 10, 6);  // 偏移6：" disk fs!"
+    partial_buf[partial_read] = '\0';
+    bool partial_read_ok = (partial_read == 9 && std::string(partial_buf) == " disk fs!");
+    
     delete[] read_buf;
+    delete[] partial_buf;
+    std::cout << "测试" << test_count << "(读取文件): " << ((full_read_ok && partial_read_ok) ? "通过" : "失败") << std::endl;
+    if (full_read_ok && partial_read_ok) pass_count++;
 
-    // 测试7: 列出文件
+    // 测试7: 列出文件（验证ls命令依赖的完整目录项）
     test_count++;
+    // 7.1 先创建第二个文件，确保ls能列出多个文件
+    disk.create_file("test2.txt");
     std::vector<DirEntry> entries = disk.list_files();
-    bool ls_ok = false;
-    for (const auto& entry : entries) {
-        if (entry.valid && std::string(entry.name) == "test1.txt" && entry.inode_num == inode1) {
-            ls_ok = true;
-            break;
+    // 验证：包含test1.txt（有效）、test2.txt（有效），无无效条目
+    int valid_count = 0;
+    bool has_invalid = false;
+    for (const auto& e : entries) 
+    {
+        if (e.valid) 
+        {
+            if (std::string(e.name) == "test1.txt" || std::string(e.name) == "test2.txt") 
+            {
+                valid_count++;
+            }
+        } 
+        else 
+        {
+            has_invalid = true;  // 不允许存在有效标记为false但仍在列表中的条目
         }
     }
+    bool ls_ok = (valid_count == 2 && !has_invalid);
     std::cout << "测试" << test_count << "(列出文件): " << (ls_ok ? "通过" : "失败") << std::endl;
     if (ls_ok) pass_count++;
 
-    // 测试8: 删除文件
+    // 测试8: 复制文件（验证copy命令核心流程）
+    test_count++;
+    // 8.1 复制test1.txt到test3.txt
+    bool copy_success = false;
+    // 模拟copy底层逻辑：读源文件→创建目标→写目标
+    int src_inode = disk.open_file("test1.txt");
+    if (src_inode != -1) 
+    {
+        int dest_inode = disk.create_file("test3.txt");
+        if (dest_inode != -1)
+        {
+            char* copy_buf = new char[content.size() + 1];
+            int read = disk.read_file(src_inode, copy_buf, content.size(), 0);
+            int write = disk.write_file(dest_inode, copy_buf, read, 0);
+            delete[] copy_buf;
+            // 验证目标文件内容与源文件一致
+            char* dest_buf = new char[content.size() + 1];
+            disk.read_file(dest_inode, dest_buf, content.size(), 0);
+            dest_buf[content.size()] = '\0';
+            copy_success = (read == write && std::string(dest_buf) == content);
+            delete[] dest_buf;
+        }
+    }
+    std::cout << "测试" << test_count << "(复制文件): " << (copy_success ? "通过" : "失败") << std::endl;
+    if (copy_success) pass_count++;
+
+
+    // 测试9: 删除文件（验证rm命令及资源释放）
     test_count++;
     bool delete_ok = disk.delete_file("test1.txt");
-    std::cout << "测试" << test_count << "(删除文件): " << (delete_ok ? "通过" : "失败") << std::endl;
-    if (delete_ok) pass_count++;
+    // 额外验证：inode标记为未使用，数据块释放（空闲块数增加）
+    bool inode_freed = false;
+    if (delete_ok) {
+        inode_freed = !disk.is_inode_used(inode1);  // inode应标记为未使用
+        std::cout << inode_freed << std::endl;
+    }
+    std::cout << "测试" << test_count << "(删除文件): " << ((delete_ok && inode_freed) ? "通过" : "失败") << std::endl;
+    if (delete_ok && inode_freed) pass_count++;
 
-    // 测试9: 验证文件已删除
+    // 测试10: 验证删除效果+卸载（关联rm后ls和unmount）
     test_count++;
-    int deleted_inode = disk.open_file("test1.txt");
-    bool verify_delete_ok = (deleted_inode == -1);
-    std::cout << "测试" << test_count << "(验证删除): " << (verify_delete_ok ? "通过" : "失败") << std::endl;
-    if (verify_delete_ok) pass_count++;
-
-    // 测试10: 卸载磁盘
-    test_count++;
+    // 10.1 验证删除后文件不再被ls列出
+    std::vector<DirEntry> post_delete_entries = disk.list_files();
+    bool deleted_in_ls = false;
+    for (const auto& e : post_delete_entries) {
+        if (std::string(e.name) == "test1.txt" && e.valid) 
+        {
+            deleted_in_ls = true;  // 如果仍存在则失败
+            break;
+        }
+    }
+    // 10.2 验证卸载成功且数据同步
     bool unmount_ok = disk.unmount();
-    std::cout << "测试" << test_count << "(卸载): " << (unmount_ok ? "通过" : "失败") << std::endl;
-    if (unmount_ok) pass_count++;
+    bool unmount_state_valid = !disk.isMounted();  // 卸载后状态应为未挂载
+    
+    // 10.3 重新挂载验证数据持久化（test3.txt应存在）
+    bool remount_ok = disk.mount();
+    bool test3_exists = (disk.open_file("test3.txt") != -1);  // copy的文件应持久化
+    disk.unmount();  // 清理测试环境
+
+    bool final_ok = (!deleted_in_ls && unmount_ok && unmount_state_valid && remount_ok && test3_exists);
+    std::cout << "测试" << test_count << "(验证删除+卸载): " << (final_ok ? "通过" : "失败") << std::endl;
+    if (final_ok) pass_count++;
 
     // 输出测试总结
     std::cout << "\n===== 测试总结 =====" << std::endl;

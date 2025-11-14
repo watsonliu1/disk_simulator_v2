@@ -8,7 +8,7 @@
 
 // 常量定义
 const int BLOCK_SIZE = 4096;               // 磁盘块大小（4KB，常见的块大小选择）
-const int INODE_SIZE = 128;                // 每个inode的大小（字节）
+const int INODE_SIZE = 96;                // 每个inode的大小（字节）
 const int MAX_FILENAME = 28;               // 最大文件名长度（含终止符，共28字节）
 const int MAX_INODES = 1024;               // 最大inode数量（支持最多1024个文件/目录）
 const int MAX_BLOCKS = (1024 * 1024 * 100) / BLOCK_SIZE;  // 总块数（100MB磁盘）
@@ -62,7 +62,7 @@ struct SuperBlock
 class DiskFS
 {
 private:
-    std::fstream disk_file;  // 磁盘文件流（用于读写磁盘文件）
+    mutable std::fstream disk_file;  // 磁盘文件流（用于读写磁盘文件）
     std::string disk_path;   // 磁盘文件路径
     SuperBlock super_block;  // 超级块（内存中的副本）
     bool is_mounted;         // 挂载状态：true表示已挂载
@@ -71,7 +71,7 @@ private:
     uint32_t get_super_block_pos() { return 0; }  // 超级块固定在0位置
     uint32_t get_block_bitmap_pos() { return super_block.block_bitmap * BLOCK_SIZE; }
     uint32_t get_inode_bitmap_pos() { return super_block.inode_bitmap * BLOCK_SIZE; }
-    uint32_t get_inode_pos(uint32_t inode_num);   // 计算inode的位置
+    uint32_t get_inode_pos(uint32_t inode_num) const;   // 计算inode的位置
     uint32_t get_data_block_pos(uint32_t block_num);  // 计算数据块的位置
 
     // 位图操作（内部使用，管理块和inode的分配）
@@ -116,6 +116,15 @@ public:
     bool isMounted() const { return is_mounted; }  // 判断是否已挂载
 
     int get_file_size(int inode_num); // 新增：获取文件大小
+
+     // 新增：判断inode是否被使用（测试专用）
+    bool is_inode_used(uint32_t inode_num) const;
+
+    // 新增：获取当前内存中的超级块数据（供测试用）
+    const SuperBlock& get_super_block() const 
+    {
+        return super_block;  // 返回超级块的常量引用（避免拷贝，确保只读）
+    }
 };
 
 #endif // DISK_FS_H
