@@ -36,6 +36,3 @@ CommandType parse_command(const std::string& input, std::vector<std::string>& ar
         return CommandType::UNKNOWN;
     }
 }
-
-
-
